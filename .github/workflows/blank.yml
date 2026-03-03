@@ -1,12 +1,8 @@
-name: Sync Spotify Revanced
+name: Sync & Sign Spotify Revanced
 
 on:
   schedule:
-    # Runs at 09:00, 15:00, and 21:00 GMT+7
-    # GMT+7 09:00 -> UTC 02:00
-    # GMT+7 15:00 -> UTC 08:00
-    # GMT+7 21:00 -> UTC 14:00
-    - cron: '0 2,8,14 * * *'
+    - cron: '0 2,8,14 * * *' # 09:00, 15:00, 21:00 GMT+7
   workflow_dispatch: 
 
 jobs:
@@ -19,17 +15,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
       - name: Download and Process APK
-        id: process_apk
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SOURCE_REPO="haidayne/APK-MOD"
           TAG="Spotifyrevanced"
           
-          echo "Fetching asset list from $SOURCE_REPO..."
-          
-          # Get the latest APK filename from the source tag
+          # Fetch the latest file name
           FILE_NAME=$(gh release view $TAG -R $SOURCE_REPO --json assets --jq '.assets[].name' | grep -E "Spotify_.*\.apk" | sort -V | tail -n 1)
           
           if [ -z "$FILE_NAME" ]; then
@@ -37,39 +36,45 @@ jobs:
             exit 1
           fi
           
-          echo "Found latest file: $FILE_NAME"
-          
-          # Download the asset
-          gh release download $TAG -R $SOURCE_REPO -p "$FILE_NAME" --clobber
-          
-          # Rename to standardized name
-          mv "$FILE_NAME" Spotify.apk
-          
-          # Extract version (e.g., 9.1.12.226) and format as v9.1.12.226
+          # Extract version (e.g., v9.1.12.226)
           VERSION_TAG="v$(echo $FILE_NAME | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
           
-          # Save to environment for next steps
-          echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_ENV
-
-      - name: Create New Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Check if this specific version tag already exists in YOUR repo
-          if gh release view "${{ env.VERSION_TAG }}" >/dev/null 2>&1; then
-            echo "Version ${{ env.VERSION_TAG }} already exists. No update needed."
-          else
-            echo "Creating new release for ${{ env.VERSION_TAG }}..."
-            gh release create "${{ env.VERSION_TAG }}" \
-              --title "Spotify Revanced ${{ env.VERSION_TAG }}" \
-              --notes "Automated sync from haidayne/APK-MOD" \
-              Spotify.apk
+          # IMPORTANT: Check if this version already exists in your repo first
+          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
+            echo "Version $VERSION_TAG already exists. Stopping to prevent override."
+            exit 0
           fi
 
-      - name: Cleanup Old Releases (Keep latest 5)
+          # If it doesn't exist, proceed with download
+          gh release download $TAG -R $SOURCE_REPO -p "$FILE_NAME" --clobber
+          
+          echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_ENV
+          echo "ORIGINAL_FILE=$FILE_NAME" >> $GITHUB_ENV
+
+      - name: Sign APK
+        if: env.VERSION_TAG != ''
+        env:
+          KEY_STORE_BASE64: ${{ secrets.KEY_STORE_BASE64 }}
+          KEY_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          # Reconstruct the .p12 file
+          echo "$KEY_STORE_BASE64" | base64 -d > release-key.p12
+          
+          # Sign the APK
+          /usr/local/lib/android/sdk/build-tools/latest/apksigner sign \
+            --ks release-key.p12 \
+            --ks-pass pass:"$KEY_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --out Spotify.apk \
+            "${{ env.ORIGINAL_FILE }}"
+
+      - name: Create New Release
+        if: env.VERSION_TAG != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Cleaning up old releases..."
-          # List all release tags, skip the newest 5, and delete the rest
-          gh release list --limit 100 | awk 'NR > 5 {print $1}' | xargs -I {} gh release delete {} --yes --cleanup-tag || true
+          gh release create "${{ env.VERSION_TAG }}" \
+            --title "Spotify Revanced ${{ env.VERSION_TAG }}" \
+            --notes "Automated sync from haidayne/APK-MOD. Signed as my own key." \
+            Spotify.apk
