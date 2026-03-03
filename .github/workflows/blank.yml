@@ -28,7 +28,6 @@ jobs:
           SOURCE_REPO="haidayne/APK-MOD"
           TAG="Spotifyrevanced"
           
-          # Fetch the latest file name
           FILE_NAME=$(gh release view $TAG -R $SOURCE_REPO --json assets --jq '.assets[].name' | grep -E "Spotify_.*\.apk" | sort -V | tail -n 1)
           
           if [ -z "$FILE_NAME" ]; then
@@ -36,16 +35,13 @@ jobs:
             exit 1
           fi
           
-          # Extract version (e.g., v9.1.12.226)
           VERSION_TAG="v$(echo $FILE_NAME | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
           
-          # IMPORTANT: Check if this version already exists in your repo first
           if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
-            echo "Version $VERSION_TAG already exists. Stopping to prevent override."
+            echo "Version $VERSION_TAG already exists. Stopping."
             exit 0
           fi
 
-          # If it doesn't exist, proceed with download
           gh release download $TAG -R $SOURCE_REPO -p "$FILE_NAME" --clobber
           
           echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_ENV
@@ -58,11 +54,15 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          # Reconstruct the .p12 file
+          # 1. Reconstruct the .p12 file
           echo "$KEY_STORE_BASE64" | base64 -d > release-key.p12
           
-          # Sign the APK
-          /usr/local/lib/android/sdk/build-tools/latest/apksigner sign \
+          # 2. Find apksigner dynamically
+          APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
+          echo "Using apksigner at: $APKSIGNER"
+          
+          # 3. Sign the APK
+          $APKSIGNER sign \
             --ks release-key.p12 \
             --ks-pass pass:"$KEY_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS" \
