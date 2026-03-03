@@ -2,6 +2,7 @@ name: Sync Spotify Revanced
 
 on:
   schedule:
+    # Runs at 09:00, 15:00, and 21:00 GMT+7
     # GMT+7 09:00 -> UTC 02:00
     # GMT+7 15:00 -> UTC 08:00
     # GMT+7 21:00 -> UTC 14:00
@@ -19,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download and Process APK
+        id: process_apk
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -27,37 +29,47 @@ jobs:
           
           echo "Fetching asset list from $SOURCE_REPO..."
           
-          # Corrected command: gh release view
+          # Get the latest APK filename from the source tag
           FILE_NAME=$(gh release view $TAG -R $SOURCE_REPO --json assets --jq '.assets[].name' | grep -E "Spotify_.*\.apk" | sort -V | tail -n 1)
           
           if [ -z "$FILE_NAME" ]; then
-            echo "Error: No matching APK file found in the release."
+            echo "Error: No matching APK file found."
             exit 1
           fi
           
           echo "Found latest file: $FILE_NAME"
           
-          # Download the specific asset
+          # Download the asset
           gh release download $TAG -R $SOURCE_REPO -p "$FILE_NAME" --clobber
           
-          # Rename to Spotify.apk
+          # Rename to standardized name
           mv "$FILE_NAME" Spotify.apk
           
-          # Extract version for the new tag (vX.X.X.X)
-          VERSION_TAG="v$(echo $FILE_NAME | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')"
+          # Extract version (e.g., 9.1.12.226) and format as v9.1.12.226
+          VERSION_TAG="v$(echo $FILE_NAME | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+          
+          # Save to environment for next steps
           echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_ENV
 
       - name: Create New Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if this version already exists in YOUR repo
+          # Check if this specific version tag already exists in YOUR repo
           if gh release view "${{ env.VERSION_TAG }}" >/dev/null 2>&1; then
-            echo "Version ${{ env.VERSION_TAG }} already exists in this repo. Skipping upload."
+            echo "Version ${{ env.VERSION_TAG }} already exists. No update needed."
           else
-            echo "Creating new release: ${{ env.VERSION_TAG }}"
+            echo "Creating new release for ${{ env.VERSION_TAG }}..."
             gh release create "${{ env.VERSION_TAG }}" \
               --title "Spotify Revanced ${{ env.VERSION_TAG }}" \
-              --notes "Automated sync from $SOURCE_REPO" \
+              --notes "Automated sync from haidayne/APK-MOD" \
               Spotify.apk
           fi
+
+      - name: Cleanup Old Releases (Keep latest 5)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Cleaning up old releases..."
+          # List all release tags, skip the newest 5, and delete the rest
+          gh release list --limit 100 | awk 'NR > 5 {print $1}' | xargs -I {} gh release delete {} --yes --cleanup-tag || true
