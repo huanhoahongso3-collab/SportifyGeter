@@ -15,88 +15,69 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Fetch and Debug LiteAPKs
+      - name: Fetch and Process
         id: liteapks
         run: |
           APP_SLUG="spotify-2"
-          echo "--- DEBUG LOG START ---" > debug_log.txt
           
           # 1. Get Post ID
-          POST_DATA=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG")
-          echo "Post API Response: $POST_DATA" >> debug_log.txt
-          POST_ID=$(echo $POST_DATA | jq -r '.[0].id')
-          
-          if [ "$POST_ID" == "null" ] || [ -z "$POST_ID" ]; then 
-            echo "Error: Slug not found" >> debug_log.txt
-            exit 1
-          fi
+          POST_ID=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG" | jq -r '.[0].id')
           
           # 2. Get App Data
           APP_JSON=$(curl -s "https://liteapks.com/wp-json/v2/posts/$POST_ID")
-          echo "App Details API: $APP_JSON" >> debug_log.txt
           
-          # 3. Clean Version Tag
+          # 3. Versioning
           RAW_VERSION=$(echo $APP_JSON | jq -r '.data.versions[0].version')
           CLEAN_VERSION=$(echo $RAW_VERSION | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
           
-          # 4. Generate Token (Triple Base64 as per Dart logic)
+          # 4. Correct Triple-Base64 Token Logic (Matching Dart Source)
+          # b64(utf8(b64(utf8(b64(utf8(timestamp))))))
           TOKEN=$(node -e "
             const ts = (Math.floor(Date.now() / 1000) + 10800).toString();
-            const s1 = Buffer.from(ts).toString('base64');
-            const s2 = Buffer.from(s1).toString('base64');
-            const s3 = Buffer.from(s2).toString('base64');
-            console.log(s3.replace(/=/g, '%3D'));
+            const b64 = (str) => Buffer.from(str).toString('base64');
+            const finalToken = b64(b64(b64(ts)));
+            console.log(finalToken.replace(/=/g, '%3D'));
           ")
-          echo "Generated Token: $TOKEN" >> debug_log.txt
 
-          # Save vars
           echo $APP_JSON | jq -c '.data.versions[0].version_downloads' > downloads.json
           echo "VERSION_TAG=v$CLEAN_VERSION" >> $GITHUB_ENV
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      - name: Download with Verbose Logging
+      - name: Download and Clean
         run: |
           mkdir -p dist
+          echo "--- Download Log ---" > dist/log.txt
+          
           cat downloads.json | jq -c '.[]' | while read i; do
             URL=$(echo $i | jq -r '.version_download_link')
             
-            # Decode Filename properly
+            # Use Node to handle decoding to avoid shell character issues
             CLEAN_NAME=$(node -e "console.log(decodeURIComponent('$URL').split('/').pop())")
-            echo "Processing File: $CLEAN_NAME" >> debug_log.txt
             
-            # Download with Verbose headers
-            echo "Attempting download for $CLEAN_NAME..." >> debug_log.txt
-            curl -v -L \
+            echo "Processing: $CLEAN_NAME" >> dist/log.txt
+            
+            # The Dart code uses the standardUrl as the Referer via the '#' fragment logic
+            # Standard URL: https://liteapks.com/spotify-2.html
+            curl -L -v \
               -H "Referer: https://liteapks.com/spotify-2.html" \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-              "$URL?token=$TOKEN" -o "dist/$CLEAN_NAME" 2>> debug_log.txt
+              -H "User-Agent: Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0" \
+              "$URL?token=$TOKEN" -o "dist/$CLEAN_NAME" 2>> dist/log.txt
             
-            # Check if file is actually an APK or just an error message
-            if grep -q "Access is not allowed" "dist/$CLEAN_NAME"; then
-              echo "CRITICAL: Download for $CLEAN_NAME failed with 'Access is not allowed' inside the file." >> debug_log.txt
-            fi
+            # Verify if the downloaded file is actually an APK (not an 'Access denied' text file)
+            FILE_TYPE=$(file "dist/$CLEAN_NAME")
+            echo "File Verification: $FILE_TYPE" >> dist/log.txt
           done
-          
-          # Add the log to the distribution folder
-          cp debug_log.txt dist/log.txt
 
-      - name: Create New Release
+      - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "${{ env.VERSION_TAG }}" >/dev/null 2>&1; then
-            echo "Version already exists. Updating log only."
-            gh release upload "${{ env.VERSION_TAG }}" dist/log.txt --clobber
+            gh release upload "${{ env.VERSION_TAG }}" dist/* --clobber
           else
             gh release create "${{ env.VERSION_TAG }}" \
               --title "Spotify ${{ env.RAW_VERSION }}" \
-              --notes "Automated sync. See log.txt for debug info." \
+              --notes "Automated sync from LiteAPKs" \
               dist/*
           fi
-
-      - name: Cleanup
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release list --limit 100 | awk 'NR > 5 {print $1}' | xargs -I {} gh release delete {} --yes --cleanup-tag || true
