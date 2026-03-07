@@ -22,60 +22,63 @@ jobs:
           
           # 1. Get Post ID
           POST_ID=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG" | jq -r '.[0].id')
-          if [ "$POST_ID" == "null" ]; then exit 1; fi
+          if [ "$POST_ID" == "null" ] || [ -z "$POST_ID" ]; then exit 1; fi
           
-          # 2. Get Data
+          # 2. Get App Data
           APP_JSON=$(curl -s "https://liteapks.com/wp-json/v2/posts/$POST_ID")
           
-          # 3. Clean Version Tag (Removes spaces/extra text for GitHub Tag compatibility)
-          # 'v9.1.28.2252 - Premium' becomes 'v9.1.28.2252'
+          # 3. Clean Version Tag for GitHub (Numeric only)
           RAW_VERSION=$(echo $APP_JSON | jq -r '.data.versions[0].version')
           CLEAN_VERSION=$(echo $RAW_VERSION | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
           
-          # 4. Generate Token (Triple Base64 logic)
+          # 4. Generate Token (Exact Dart Logic: Triple Base64 + Replace =)
           TOKEN=$(node -e "
             const ts = (Math.floor(Date.now() / 1000) + 10800).toString();
             const s1 = Buffer.from(ts).toString('base64');
             const s2 = Buffer.from(s1).toString('base64');
-            console.log(Buffer.from(s2).toString('base64').replace(/=/g, '%3D'));
+            const s3 = Buffer.from(s2).toString('base64');
+            console.log(s3.replace(/=/g, '%3D'));
           ")
 
-          # 5. Extract all download links and their original filenames
-          # This stores them as a JSON string for the next step
+          # 5. Extract downloads to temporary file
           echo $APP_JSON | jq -c '.data.versions[0].version_downloads' > downloads.json
           
           echo "VERSION_TAG=v$CLEAN_VERSION" >> $GITHUB_ENV
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      - name: Download All APKs
+      - name: Download and Clean Filenames
         run: |
           mkdir -p dist
-          # Loop through each download item in the JSON
           cat downloads.json | jq -c '.[]' | while read i; do
             URL=$(echo $i | jq -r '.version_download_link')
-            # Get original filename from URL
-            ORIGINAL_NAME=$(basename "$URL")
-            echo "Downloading $ORIGINAL_NAME..."
-            curl -L -H "Referer: https://liteapks.com/" "$URL?token=$TOKEN" -o "dist/$ORIGINAL_NAME"
+            
+            # Use Node to decode the URL and get a clean filename (removes %20, etc.)
+            CLEAN_NAME=$(node -e "console.log(decodeURIComponent('$URL').split('/').pop())")
+            
+            echo "Downloading: $CLEAN_NAME"
+            
+            # Crucial: Referer MUST match the source URL exactly to avoid "Access not allowed"
+            curl -L \
+              -H "Referer: https://liteapks.com/spotify-2.html" \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+              "$URL?token=$TOKEN" -o "dist/$CLEAN_NAME"
           done
 
       - name: Create New Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if sanitized version tag exists
           if gh release view "${{ env.VERSION_TAG }}" >/dev/null 2>&1; then
-            echo "Release ${{ env.VERSION_TAG }} already exists. Skipping."
+            echo "Version ${{ env.VERSION_TAG }} already exists."
           else
-            echo "Creating release for ${{ env.VERSION_TAG }}..."
             gh release create "${{ env.VERSION_TAG }}" \
               --title "Spotify ${{ env.RAW_VERSION }}" \
-              --notes "Automated sync from LiteAPKs." \
+              --notes "Automated sync from LiteAPKs (spotify-2)" \
               dist/*
           fi
 
-      - name: Cleanup Old Releases (Keep latest 5)
+      - name: Cleanup Old Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
