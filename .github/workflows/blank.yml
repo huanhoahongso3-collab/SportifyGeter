@@ -30,13 +30,15 @@ jobs:
           RAW_VERSION=$(echo $APP_JSON | jq -r '.data.versions[0].version')
           CLEAN_VERSION=$(echo $RAW_VERSION | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
           
-          # 4. Correct Triple-Base64 Token Logic (Matching Dart Source)
-          # b64(utf8(b64(utf8(b64(utf8(timestamp))))))
+          # 4. Refined Triple-Base64 Token Logic
+          # The Dart code uses: base64.encode(utf8.encode(base64.encode(utf8.encode(...))))
           TOKEN=$(node -e "
             const ts = (Math.floor(Date.now() / 1000) + 10800).toString();
-            const b64 = (str) => Buffer.from(str).toString('base64');
-            const finalToken = b64(b64(b64(ts)));
-            console.log(finalToken.replace(/=/g, '%3D'));
+            const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+            const step1 = b64(ts);
+            const step2 = b64(step1);
+            const step3 = b64(step2);
+            console.log(step3.replace(/=/g, '%3D'));
           ")
 
           echo $APP_JSON | jq -c '.data.versions[0].version_downloads' > downloads.json
@@ -57,16 +59,17 @@ jobs:
             
             echo "Processing: $CLEAN_NAME" >> dist/log.txt
             
-            # The Dart code uses the standardUrl as the Referer via the '#' fragment logic
-            # Standard URL: https://liteapks.com/spotify-2.html
+            # The Referer must be the exact URL of the app page
             curl -L -v \
               -H "Referer: https://liteapks.com/spotify-2.html" \
-              -H "User-Agent: Mozilla/5.0 (Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0" \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" \
+              -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8" \
               "$URL?token=$TOKEN" -o "dist/$CLEAN_NAME" 2>> dist/log.txt
             
-            # Verify if the downloaded file is actually an APK (not an 'Access denied' text file)
-            FILE_TYPE=$(file "dist/$CLEAN_NAME")
-            echo "File Verification: $FILE_TYPE" >> dist/log.txt
+            # Check if the file is valid or an error message
+            if grep -q "Access is not allowed" "dist/$CLEAN_NAME"; then
+              echo "Error: Access Denied for $CLEAN_NAME" >> dist/log.txt
+            fi
           done
 
       - name: Create Release
@@ -78,6 +81,6 @@ jobs:
           else
             gh release create "${{ env.VERSION_TAG }}" \
               --title "Spotify ${{ env.RAW_VERSION }}" \
-              --notes "Automated sync from LiteAPKs" \
+              --notes "Automated sync from LiteAPKs (spotify-2)" \
               dist/*
           fi
