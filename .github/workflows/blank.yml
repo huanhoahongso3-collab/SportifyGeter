@@ -15,23 +15,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Fetch LiteAPKs Details
+      - name: Fetch and Debug LiteAPKs
         id: liteapks
         run: |
-          APP_SLUG="spotify-music-98" 
+          APP_SLUG="spotify-2"
+          echo "--- DEBUG LOG START ---" > debug_log.txt
           
           # 1. Get Post ID
-          POST_ID=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG" | jq -r '.[0].id')
-          if [ "$POST_ID" == "null" ] || [ -z "$POST_ID" ]; then exit 1; fi
+          POST_DATA=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG")
+          echo "Post API Response: $POST_DATA" >> debug_log.txt
+          POST_ID=$(echo $POST_DATA | jq -r '.[0].id')
+          
+          if [ "$POST_ID" == "null" ] || [ -z "$POST_ID" ]; then 
+            echo "Error: Slug not found" >> debug_log.txt
+            exit 1
+          fi
           
           # 2. Get App Data
           APP_JSON=$(curl -s "https://liteapks.com/wp-json/v2/posts/$POST_ID")
+          echo "App Details API: $APP_JSON" >> debug_log.txt
           
-          # 3. Clean Version Tag for GitHub (Numeric only)
+          # 3. Clean Version Tag
           RAW_VERSION=$(echo $APP_JSON | jq -r '.data.versions[0].version')
           CLEAN_VERSION=$(echo $RAW_VERSION | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
           
-          # 4. Generate Token (Exact Dart Logic: Triple Base64 + Replace =)
+          # 4. Generate Token (Triple Base64 as per Dart logic)
           TOKEN=$(node -e "
             const ts = (Math.floor(Date.now() / 1000) + 10800).toString();
             const s1 = Buffer.from(ts).toString('base64');
@@ -39,46 +47,55 @@ jobs:
             const s3 = Buffer.from(s2).toString('base64');
             console.log(s3.replace(/=/g, '%3D'));
           ")
+          echo "Generated Token: $TOKEN" >> debug_log.txt
 
-          # 5. Extract downloads to temporary file
+          # Save vars
           echo $APP_JSON | jq -c '.data.versions[0].version_downloads' > downloads.json
-          
           echo "VERSION_TAG=v$CLEAN_VERSION" >> $GITHUB_ENV
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
           echo "TOKEN=$TOKEN" >> $GITHUB_ENV
 
-      - name: Download and Clean Filenames
+      - name: Download with Verbose Logging
         run: |
           mkdir -p dist
           cat downloads.json | jq -c '.[]' | while read i; do
             URL=$(echo $i | jq -r '.version_download_link')
             
-            # Use Node to decode the URL and get a clean filename (removes %20, etc.)
+            # Decode Filename properly
             CLEAN_NAME=$(node -e "console.log(decodeURIComponent('$URL').split('/').pop())")
+            echo "Processing File: $CLEAN_NAME" >> debug_log.txt
             
-            echo "Downloading: $CLEAN_NAME"
-            
-            # Crucial: Referer MUST match the source URL exactly to avoid "Access not allowed"
-            curl -L \
+            # Download with Verbose headers
+            echo "Attempting download for $CLEAN_NAME..." >> debug_log.txt
+            curl -v -L \
               -H "Referer: https://liteapks.com/spotify-2.html" \
               -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-              "$URL?token=$TOKEN" -o "dist/$CLEAN_NAME"
+              "$URL?token=$TOKEN" -o "dist/$CLEAN_NAME" 2>> debug_log.txt
+            
+            # Check if file is actually an APK or just an error message
+            if grep -q "Access is not allowed" "dist/$CLEAN_NAME"; then
+              echo "CRITICAL: Download for $CLEAN_NAME failed with 'Access is not allowed' inside the file." >> debug_log.txt
+            fi
           done
+          
+          # Add the log to the distribution folder
+          cp debug_log.txt dist/log.txt
 
       - name: Create New Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view "${{ env.VERSION_TAG }}" >/dev/null 2>&1; then
-            echo "Version ${{ env.VERSION_TAG }} already exists."
+            echo "Version already exists. Updating log only."
+            gh release upload "${{ env.VERSION_TAG }}" dist/log.txt --clobber
           else
             gh release create "${{ env.VERSION_TAG }}" \
               --title "Spotify ${{ env.RAW_VERSION }}" \
-              --notes "Automated sync from LiteAPKs (spotify-2)" \
+              --notes "Automated sync. See log.txt for debug info." \
               dist/*
           fi
 
-      - name: Cleanup Old Releases
+      - name: Cleanup
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
