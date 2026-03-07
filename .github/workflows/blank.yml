@@ -1,12 +1,8 @@
-name: Sync Spotify Revanced
+name: Sync Spotify LiteAPKs
 
 on:
   schedule:
-    # Runs at 09:00, 15:00, and 21:00 GMT+7
-    # GMT+7 09:00 -> UTC 02:00
-    # GMT+7 15:00 -> UTC 08:00
-    # GMT+7 21:00 -> UTC 14:00
-    - cron: '0 2,8,14 * * *'
+    - cron: '0 2,8,14 * * *' # GMT+7: 09:00, 15:00, 21:00
   workflow_dispatch: 
 
 jobs:
@@ -19,50 +15,60 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download and Process APK
-        id: process_apk
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch LiteAPKs Details
+        id: liteapks
         run: |
-          SOURCE_REPO="haidayne/APK-MOD"
-          TAG="Spotifyrevanced"
+          # 1. Configuration - Updated to the specific slug you provided
+          APP_SLUG="spotify-2" 
           
-          echo "Fetching asset list from $SOURCE_REPO..."
-          
-          # Get the latest APK filename from the source tag
-          FILE_NAME=$(gh release view $TAG -R $SOURCE_REPO --json assets --jq '.assets[].name' | grep -E "Spotify_.*\.apk" | sort -V | tail -n 1)
-          
-          if [ -z "$FILE_NAME" ]; then
-            echo "Error: No matching APK file found."
+          # 2. Get Post ID from Slug
+          POST_ID=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG" | jq -r '.[0].id')
+          if [ "$POST_ID" == "null" ] || [ -z "$POST_ID" ]; then 
+            echo "Error: App slug '$APP_SLUG' not found."
             exit 1
           fi
           
-          echo "Found latest file: $FILE_NAME"
+          # 3. Get App Details
+          APP_JSON=$(curl -s "https://liteapks.com/wp-json/v2/posts/$POST_ID")
+          VERSION=$(echo $APP_JSON | jq -r '.data.versions[0].version')
+          DL_LINK=$(echo $APP_JSON | jq -r '.data.versions[0].version_downloads[0].version_download_link')
+          PUBLISHER=$(echo $APP_JSON | jq -r '.data.publisher // "LiteAPKs"')
+          TITLE=$(echo $APP_JSON | jq -r '.data.title // "Spotify"')
           
-          # Download the asset
-          gh release download $TAG -R $SOURCE_REPO -p "$FILE_NAME" --clobber
+          # 4. Generate the exact Double-Base64 Token (Dart logic)
+          # Logic: b64(utf8(b64(utf8(timestamp + 10800))))
+          TOKEN=$(node -e "
+            const ts = (Math.floor(Date.now() / 1000) + 10800).toString();
+            const step1 = Buffer.from(ts).toString('base64');
+            const step2 = Buffer.from(step1).toString('base64');
+            console.log(Buffer.from(step2).toString('base64').replace(/=/g, '%3D'));
+          ")
           
-          # Rename to standardized name
-          mv "$FILE_NAME" Spotify.apk
+          echo "VERSION_TAG=v$VERSION" >> $GITHUB_ENV
+          echo "FINAL_DL_URL=$DL_LINK?token=$TOKEN" >> $GITHUB_ENV
+          echo "NOTES=Publisher: $PUBLISHER | Source: LiteAPKs ($TITLE)" >> $GITHUB_ENV
+
+      - name: Download and Rename APK
+        run: |
+          # Download using the required Referer and save as 'Spotify.apk' (removes versioning)
+          curl -L -H "Referer: https://liteapks.com/$APP_SLUG.html" "$FINAL_DL_URL" -o Spotify.apk
           
-          # Extract version (e.g., 9.1.12.226) and format as v9.1.12.226
-          VERSION_TAG="v$(echo $FILE_NAME | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
-          
-          # Save to environment for next steps
-          echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_ENV
+          # Basic validation: ensure file isn't empty
+          if [ ! -s Spotify.apk ]; then
+            echo "Error: Downloaded file is empty."
+            exit 1
+          fi
 
       - name: Create New Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if this specific version tag already exists in YOUR repo
           if gh release view "${{ env.VERSION_TAG }}" >/dev/null 2>&1; then
-            echo "Version ${{ env.VERSION_TAG }} already exists. No update needed."
+            echo "Version ${{ env.VERSION_TAG }} already exists. Skipping."
           else
-            echo "Creating new release for ${{ env.VERSION_TAG }}..."
             gh release create "${{ env.VERSION_TAG }}" \
-              --title "Spotify Revanced ${{ env.VERSION_TAG }}" \
-              --notes "Automated sync from haidayne/APK-MOD" \
+              --title "Spotify ${{ env.VERSION_TAG }}" \
+              --notes "${{ env.NOTES }}" \
               Spotify.apk
           fi
 
@@ -70,6 +76,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Cleaning up old releases..."
-          # List all release tags, skip the newest 5, and delete the rest
           gh release list --limit 100 | awk 'NR > 5 {print $1}' | xargs -I {} gh release delete {} --yes --cleanup-tag || true
