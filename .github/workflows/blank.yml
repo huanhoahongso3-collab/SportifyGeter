@@ -18,7 +18,7 @@ jobs:
       - name: Fetch LiteAPKs Details
         id: liteapks
         run: |
-          APP_SLUG="spotify-2" 
+          APP_SLUG="spotify-music-98" 
           
           # 1. Get Post ID
           POST_ID=$(curl -s "https://liteapks.com/wp-json/wp/v2/posts?slug=$APP_SLUG" | jq -r '.[0].id')
